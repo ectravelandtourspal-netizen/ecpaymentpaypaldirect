@@ -7,8 +7,11 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Booking cache for pending bookings (in-memory, use DB for production)
-// require('./booking-cache'); // Removed: file not present and not needed
+
+// In-memory cache for pending bookings (keyed by email)
+const pendingBookings = {};
+module.exports.pendingBookings = pendingBookings;
+// NOTE: In production, use a database or persistent store instead.
 
 // Google Apps Script Web App URL for updating Google Sheet
 const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby09WxzfRyR6OMAO8804veQUItQ4k4-amM1OvemDVUpuHiyimb0U11JPXdE26oHk0DT/exec';
@@ -140,8 +143,9 @@ app.post('/api/booking', async (req, res) => {
 
     const paypalUrl = `https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business=${businessEmail}&item_name=${itemName}&amount=${amount}&currency_code=${currency}&quantity=1&return=${returnUrl}&cancel_return=${cancelUrl}&custom=${custom}`;
 
-    // Optionally: cache bookingData by email or session for later use after webhook
-    // For now, just return the PayPal URL
+    // Store booking data in memory for webhook use
+    pendingBookings[bookingData.email] = bookingData;
+
     res.json({
       success: true,
       paypalUrl

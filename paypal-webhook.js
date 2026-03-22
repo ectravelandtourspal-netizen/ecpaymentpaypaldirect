@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
-const { saveBookingToSheet } = require('./server'); // Reuse booking save logic
+const { saveBookingToSheet, pendingBookings } = require('./server'); // Reuse booking save logic and cache
 
 // Util: Send confirmation email (implement as needed)
 async function sendConfirmationEmail(bookingData) {
@@ -26,13 +26,13 @@ router.post('/paypal-webhook', async (req, res) => {
       if (!payerEmail) {
         return res.status(400).json({ success: false, error: 'No payer email in webhook' });
       }
-      // Retrieve booking data (should be stored by email, e.g., in a DB or in-memory cache)
-      // For demo: assume booking data is sent in webhook (custom integration needed for production)
-      const bookingData = event.resource.bookingData || null;
+      // Retrieve booking data from in-memory cache
+      const bookingData = pendingBookings && pendingBookings[payerEmail] ? pendingBookings[payerEmail] : null;
       if (!bookingData) {
-        // In production, look up bookingData by payerEmail from your DB/cache
         return res.status(400).json({ success: false, error: 'No booking data found for email' });
       }
+      // Optionally: remove from cache after use
+      if (pendingBookings) delete pendingBookings[payerEmail];
       // Save booking to Google Sheet
       await saveBookingToSheet(bookingData);
       // Send confirmation email
