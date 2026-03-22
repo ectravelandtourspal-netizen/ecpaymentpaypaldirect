@@ -116,8 +116,9 @@ async function createPayPalOrder(bookingData, downpayment) {
       application_context: {
         brand_name: 'EC Travel and Tours',
         user_action: 'PAY_NOW',
-        return_url: bookingData.returnUrl || 'https://your-website.com/booking-success',
-        cancel_url: bookingData.cancelUrl || 'https://your-website.com/booking-cancel',
+        // Set your actual frontend URL for return/cancel
+        return_url: 'https://ectravelandtours.com/booking-success.html',
+        cancel_url: 'https://ectravelandtours.com/booking-cancelled.html',
       },
     }),
   });

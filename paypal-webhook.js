@@ -69,6 +69,12 @@ router.post('/paypal-webhook', async (req, res) => {
   const event = req.body;
   console.log('\n🔔 PayPal Webhook called');
   console.log('Event payload:', JSON.stringify(event, null, 2));
+  // Extra logging for Render debugging
+  try {
+    require('fs').appendFileSync('/tmp/paypal-webhook.log', `\n[${new Date().toISOString()}] Webhook: ${JSON.stringify(event)}\n`);
+  } catch (e) {
+    console.log('Could not write webhook log:', e.message);
+  }
   // PayPal webhook event types: https://developer.paypal.com/docs/api-basics/notifications/webhooks/event-names/
   if (!event || !event.event_type) {
     console.error('❌ Invalid webhook payload');
