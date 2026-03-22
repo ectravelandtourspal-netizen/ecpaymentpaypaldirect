@@ -141,7 +141,8 @@ app.post('/api/booking', async (req, res) => {
     const custom = encodeURIComponent(bookingData.email);
     const amount = bookingData.downpayment;
 
-    const paypalUrl = `https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business=${businessEmail}&item_name=${itemName}&amount=${amount}&currency_code=${currency}&quantity=1&return=${returnUrl}&cancel_return=${cancelUrl}&custom=${custom}`;
+    // Use PayPal sandbox for testing
+    const paypalUrl = `https://www.sandbox.paypal.com/cgi-bin/webscr?cmd=_xclick&business=${businessEmail}&item_name=${itemName}&amount=${amount}&currency_code=${currency}&quantity=1&return=${returnUrl}&cancel_return=${cancelUrl}&custom=${custom}`;
 
     // Store booking data in memory for webhook use
     pendingBookings[bookingData.email] = bookingData;
