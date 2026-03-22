@@ -8,7 +8,7 @@ app.use(express.json());
 app.use(cors());
 
 // Booking cache for pending bookings (in-memory, use DB for production)
-require('./booking-cache');
+// require('./booking-cache'); // Removed: file not present and not needed
 
 // Google Apps Script Web App URL for updating Google Sheet
 const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycby09WxzfRyR6OMAO8804veQUItQ4k4-amM1OvemDVUpuHiyimb0U11JPXdE26oHk0DT/exec';
