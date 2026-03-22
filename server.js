@@ -70,6 +70,86 @@ app.use((err, req, res, next) => {
 const paypalWebhookRouter = require('./paypal-webhook');
 app.use('/', paypalWebhookRouter);
 
+// --- NEW: PayPal direct payment booking endpoint ---
+const fetch = require('node-fetch');
+
+// Replace with your PayPal credentials
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID || 'YOUR_PAYPAL_CLIENT_ID';
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET || 'YOUR_PAYPAL_CLIENT_SECRET';
+const PAYPAL_API_BASE = process.env.PAYPAL_API_BASE || 'https://api-m.sandbox.paypal.com'; // Use sandbox for testing
+
+// Util: Get PayPal access token
+async function getPayPalAccessToken() {
+  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
+  const res = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  const data = await res.json();
+  return data.access_token;
+}
+
+// Util: Create PayPal order
+async function createPayPalOrder(bookingData, downpayment) {
+  const accessToken = await getPayPalAccessToken();
+  const res = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({
+      intent: 'CAPTURE',
+      purchase_units: [
+        {
+          amount: {
+            currency_code: 'PHP',
+            value: String(downpayment),
+          },
+          custom_id: bookingData.email, // This is how we link payment to booking
+        },
+      ],
+      application_context: {
+        brand_name: 'EC Travel and Tours',
+        user_action: 'PAY_NOW',
+        return_url: bookingData.returnUrl || 'https://your-website.com/booking-success',
+        cancel_url: bookingData.cancelUrl || 'https://your-website.com/booking-cancel',
+      },
+    }),
+  });
+  const data = await res.json();
+  return data;
+}
+
+// POST /api/booking: Store booking, create PayPal order, return PayPal URL
+app.post('/api/booking', async (req, res) => {
+  try {
+    const bookingData = req.body;
+    if (!bookingData.email) {
+      return res.status(400).json({ success: false, error: 'Missing email' });
+    }
+    // Calculate downpayment (use frontend logic or override here)
+    const downpayment = bookingData.downpayment || 5000 * (parseInt(bookingData.numberOfGuests, 10) || 1);
+    // Store booking in pendingBookings
+    pendingBookings[bookingData.email] = bookingData;
+    // Create PayPal order
+    const order = await createPayPalOrder(bookingData, downpayment);
+    const approveUrl = order.links && order.links.find(l => l.rel === 'approve');
+    if (approveUrl) {
+      return res.json({ success: true, paypalUrl: approveUrl.href });
+    } else {
+      return res.status(500).json({ success: false, error: 'Failed to create PayPal order', details: order });
+    }
+  } catch (err) {
+    console.error('❌ /api/booking error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
