@@ -1,10 +1,12 @@
 # EC Travel and Tours - Backend Server
 
-Backend server for server-side integrations (including PayPal order create + capture).
+Optional backend server for advanced server-side features.
 
 ## Important
 
-For PayPal-required booking flow, this backend is required because PayPal API credentials must stay on server-side.
+For the current production setup, booking data is saved directly from `booking.html`
+to a Google Apps Script Web App, so this backend is **not required** for the current booking flow.
+Use this backend only if you need private server-side integrations.
 
 ## Setup
 
@@ -16,10 +18,9 @@ npm install
 ### 2. Environment Variables
 Create a `.env` file in the backend directory:
 ```
-PAYPAL_CLIENT_ID=your_paypal_client_id
-PAYPAL_CLIENT_SECRET=your_paypal_client_secret
-PAYPAL_ENV=sandbox
-PAYPAL_WEBHOOK_ID=your_paypal_webhook_id
+TWILIO_ACCOUNT_SID=your_twilio_account_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
+TWILIO_WHATSAPP_NUMBER=+14155238886
 PORT=3000
 ```
 
@@ -59,33 +60,6 @@ Content-Type: application/json
 }
 ```
 
-### Create PayPal Order
-```
-POST /paypal/create-order
-Content-Type: application/json
-
-{
-  "amount": 10000,
-  "currency": "PHP",
-  "guestName": "Juan Dela Cruz",
-  "email": "guest@example.com",
-  "description": "Down payment",
-  "successUrl": "https://your-site.com/booking.html?paypal=success",
-  "cancelUrl": "https://your-site.com/booking.html?paypal=cancelled"
-}
-```
-
-### Capture PayPal Order
-```
-POST /paypal/capture-order/:orderId
-```
-
-### PayPal Webhook Receiver
-```
-POST /paypal/webhook
-```
-Receives and verifies PayPal webhook events using `PAYPAL_WEBHOOK_ID`.
-
 **Response:**
 ```json
 {
@@ -100,21 +74,11 @@ Receives and verifies PayPal webhook events using `PAYPAL_WEBHOOK_ID`.
 
 - Booking save uses the Google Apps Script Web App URL configured in `server.js`
 - `/save-booking` forwards booking data to Apps Script with `action: 'save_booking'`
-- PayPal endpoints require `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` in backend `.env`
-- Webhook verification also requires `PAYPAL_WEBHOOK_ID` in backend `.env`
 - All timestamps are in UTC
 - Store secrets only in `.env` and never commit real credentials
 
-## Render Deploy Checklist
-
-- Root Directory: `backend`
-- Build Command: `npm install`
-- Start Command: `npm start`
-- Required env vars: `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_ENV`, `PAYPAL_WEBHOOK_ID`
-- Optional env var: `PORT` (Render usually sets this automatically)
-
 ## Troubleshooting
 
-1. **"Missing PayPal Credentials"** - Ensure `.env` has `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`
+1. **"Missing Twilio Credentials"** - Ensure `.env` file is properly configured
 2. **"Booking save failed"** - Verify the Apps Script Web App URL and deployment permissions
 3. **"Missing required fields"** - Ensure `firstName`, `lastName`, and `email` are sent in request body
