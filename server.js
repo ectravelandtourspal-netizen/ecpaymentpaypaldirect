@@ -116,6 +116,44 @@ async function saveBookingToSheet(bookingData) {
 }
 
 // Health check endpoint
+// New: Booking endpoint for PayPal-first workflow
+app.post('/api/booking', async (req, res) => {
+  const bookingData = req.body;
+  // Basic validation
+  if (!bookingData.firstName || !bookingData.lastName || !bookingData.email || !bookingData.downpayment) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required fields: firstName, lastName, email, downpayment'
+    });
+  }
+
+  try {
+    // Prepare PayPal payment URL (simple redirect, not REST API)
+    // You may want to use PayPal REST API for production
+    const businessEmail = process.env.PAYPAL_BUSINESS_EMAIL || 'YOUR_PAYPAL_BUSINESS_EMAIL';
+    const itemName = encodeURIComponent('EC Travel and Tours Downpayment');
+    const currency = 'PHP';
+    const returnUrl = encodeURIComponent(process.env.PAYPAL_RETURN_URL || 'https://ectravelandtours.com/paypal-success.html');
+    const cancelUrl = encodeURIComponent(process.env.PAYPAL_CANCEL_URL || 'https://ectravelandtours.com/paypal-cancel.html');
+    const custom = encodeURIComponent(bookingData.email);
+    const amount = bookingData.downpayment;
+
+    const paypalUrl = `https://www.paypal.com/cgi-bin/webscr?cmd=_xclick&business=${businessEmail}&item_name=${itemName}&amount=${amount}&currency_code=${currency}&quantity=1&return=${returnUrl}&cancel_return=${cancelUrl}&custom=${custom}`;
+
+    // Optionally: cache bookingData by email or session for later use after webhook
+    // For now, just return the PayPal URL
+    res.json({
+      success: true,
+      paypalUrl
+    });
+  } catch (err) {
+    console.error('Error preparing PayPal URL:', err);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to initiate payment'
+    });
+  }
+});
 app.get('/health', (req, res) => {
   res.json({ status: 'Server is running', timestamp: new Date() });
 });
