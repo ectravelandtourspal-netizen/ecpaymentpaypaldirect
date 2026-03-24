@@ -22,7 +22,7 @@ app.use(cors({
 }));
 
 // Google Apps Script Web App URL for updating Google Sheet
-const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzD9CSfWDWdiSs5m2R-E74hdL7b6BHH3Ls_htofPZiNboJJPVTEK8Jo3IOknFd1x-Ve/exec';
+const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyyQv8WPzCU60mUc2nJRTpVNJDfnK4yMm7h8B22bUQs8iMROcTrAGHeS5tdw6TS62tE/exec';
 
 // ================= PAYPAL CONFIGURATION =================
 const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
