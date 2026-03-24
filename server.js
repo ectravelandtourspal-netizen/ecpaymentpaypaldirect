@@ -273,8 +273,9 @@ app.post('/api/paypal/create-order', async (req, res) => {
   }
 
   try {
-    const returnUrl = `${FRONTEND_URL}/booking.html?paypal=capture`;
-    const cancelUrl = `${FRONTEND_URL}/booking.html?paypal=cancelled`;
+    const primaryOrigin = ALLOWED_ORIGINS[0];
+    const returnUrl = `${primaryOrigin}/booking.html?paypal=capture`;
+    const cancelUrl = `${primaryOrigin}/booking.html?paypal=cancelled`;
 
     const order = await createPayPalOrder(
       parseFloat(amount),
@@ -337,6 +338,40 @@ app.post('/api/paypal/capture-order', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ PayPal capture-order error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ================= EMAIL PROXY =================
+// Proxy EmailJS calls through the backend to avoid IPv6 connectivity issues
+
+const EMAILJS_API_URL = 'https://api.emailjs.com/api/v1.0/email/send';
+
+app.post('/api/send-email', async (req, res) => {
+  const { service_id, template_id, template_params, user_id } = req.body;
+
+  if (!service_id || !template_id || !template_params || !user_id) {
+    return res.status(400).json({ success: false, error: 'Missing required fields' });
+  }
+
+  try {
+    const response = await fetch(EMAILJS_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service_id, template_id, template_params, user_id }),
+    });
+
+    const text = await response.text();
+
+    if (response.ok) {
+      console.log(`✅ Email sent via ${template_id}`);
+      res.json({ success: true, status: response.status, text });
+    } else {
+      console.error(`❌ EmailJS error: ${response.status} ${text}`);
+      res.status(response.status).json({ success: false, error: text });
+    }
+  } catch (error) {
+    console.error('❌ Email proxy error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -528,6 +563,7 @@ app.listen(PORT, () => {
   console.log(`  - POST /api/paypal/create-order (Create PayPal checkout)`);
   console.log(`  - POST /api/paypal/capture-order (Capture PayPal payment)`);
   console.log(`  - POST /api/paypal/webhook (PayPal event notifications)`);
+  console.log(`  - POST /api/send-email (Email proxy via EmailJS)`);
   if (PAYPAL_WEBHOOK_ID) {
     console.log(`\n🔔 Webhook signature verification: ENABLED`);
   } else {
