@@ -3,6 +3,10 @@ const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+
+// PayPal webhook needs raw body for signature verification — must be before express.json()
+app.post('/api/paypal/webhook', express.raw({ type: 'application/json' }), handlePayPalWebhook);
+
 app.use(express.json());
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8000';
@@ -27,6 +31,7 @@ const PAYPAL_MODE = process.env.PAYPAL_MODE || 'sandbox';
 const PAYPAL_BASE_URL = PAYPAL_MODE === 'live'
   ? 'https://api-m.paypal.com'
   : 'https://api-m.sandbox.paypal.com';
+const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
 
 // Get PayPal access token
 async function getPayPalAccessToken() {
@@ -336,6 +341,171 @@ app.post('/api/paypal/capture-order', async (req, res) => {
   }
 });
 
+// ================= PAYPAL WEBHOOK =================
+
+// Verify PayPal webhook signature using PayPal's verification API
+async function verifyWebhookSignature(headers, rawBody) {
+  if (!PAYPAL_WEBHOOK_ID) {
+    console.warn('⚠️ PAYPAL_WEBHOOK_ID not set — skipping signature verification');
+    return false;
+  }
+
+  const accessToken = await getPayPalAccessToken();
+  const response = await fetch(`${PAYPAL_BASE_URL}/v1/notifications/verify-webhook-signature`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      auth_algo: headers['paypal-auth-algo'],
+      cert_url: headers['paypal-cert-url'],
+      transmission_id: headers['paypal-transmission-id'],
+      transmission_sig: headers['paypal-transmission-sig'],
+      transmission_time: headers['paypal-transmission-time'],
+      webhook_id: PAYPAL_WEBHOOK_ID,
+      webhook_event: JSON.parse(rawBody),
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('❌ Webhook signature verification request failed:', errorText);
+    return false;
+  }
+
+  const result = await response.json();
+  return result.verification_status === 'SUCCESS';
+}
+
+// Map PayPal event types to sheet-friendly payment statuses
+function mapEventToPaymentStatus(eventType) {
+  const statusMap = {
+    'PAYMENT.CAPTURE.COMPLETED': 'Paid',
+    'PAYMENT.CAPTURE.REFUNDED': 'Refunded',
+    'PAYMENT.CAPTURE.REVERSED': 'Reversed',
+    'PAYMENT.CAPTURE.DENIED': 'Denied',
+    'PAYMENT.CAPTURE.PENDING': 'Pending',
+  };
+  return statusMap[eventType] || eventType;
+}
+
+// Update Google Sheet payment status via Apps Script
+async function updatePaymentStatusInSheet(transactionId, newStatus, eventType, eventDetails) {
+  try {
+    console.log(`📋 Updating Google Sheet: Transaction ${transactionId} → ${newStatus}`);
+
+    const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'update_payment_status',
+        paypalTransactionId: transactionId,
+        paymentStatus: newStatus,
+        eventType: eventType,
+        eventDetails: eventDetails,
+      }),
+    });
+
+    const result = await response.json();
+    if (result.success || result.status === 'success') {
+      console.log(`✅ Sheet updated: ${transactionId} → ${newStatus} (rows: ${result.updatedRows || 0})`);
+      return true;
+    } else {
+      console.error('❌ Sheet update failed:', result.error || result.message);
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Error updating sheet via Apps Script:', error.message);
+    return false;
+  }
+}
+
+// PayPal webhook handler
+async function handlePayPalWebhook(req, res) {
+  const rawBody = req.body.toString('utf8');
+
+  console.log('\n🔔 PayPal Webhook received');
+
+  // Parse event
+  let event;
+  try {
+    event = JSON.parse(rawBody);
+  } catch (err) {
+    console.error('❌ Invalid webhook JSON');
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+
+  const eventType = event.event_type;
+  console.log(`   Event: ${eventType}`);
+  console.log(`   ID: ${event.id}`);
+
+  // Verify signature (if webhook ID is configured)
+  if (PAYPAL_WEBHOOK_ID) {
+    try {
+      const isValid = await verifyWebhookSignature(req.headers, rawBody);
+      if (!isValid) {
+        console.error('❌ Webhook signature verification FAILED — rejecting');
+        return res.status(401).json({ error: 'Signature verification failed' });
+      }
+      console.log('   ✅ Signature verified');
+    } catch (verifyError) {
+      console.error('❌ Webhook verification error:', verifyError.message);
+      return res.status(500).json({ error: 'Verification error' });
+    }
+  }
+
+  // Handle payment capture events
+  const HANDLED_EVENTS = [
+    'PAYMENT.CAPTURE.COMPLETED',
+    'PAYMENT.CAPTURE.REFUNDED',
+    'PAYMENT.CAPTURE.REVERSED',
+    'PAYMENT.CAPTURE.DENIED',
+    'PAYMENT.CAPTURE.PENDING',
+  ];
+
+  if (HANDLED_EVENTS.includes(eventType)) {
+    const resource = event.resource || {};
+    // For refund events, the transaction ID is in resource.links or resource.id
+    // For capture events, it's resource.id
+    let transactionId = '';
+
+    if (eventType === 'PAYMENT.CAPTURE.REFUNDED') {
+      // Refund event: resource is the refund object, parent capture ID is in links
+      const captureLink = (resource.links || []).find(l => l.rel === 'up');
+      if (captureLink && captureLink.href) {
+        // Extract capture ID from URL: .../captures/CAPTURE_ID
+        const parts = captureLink.href.split('/');
+        transactionId = parts[parts.length - 1];
+      }
+      // Fallback: check supplementary_data
+      if (!transactionId) {
+        transactionId = resource.supplementary_data?.related_ids?.capture_id || resource.id || '';
+      }
+    } else {
+      // For COMPLETED, DENIED, PENDING, REVERSED — resource.id IS the capture/transaction ID
+      transactionId = resource.id || '';
+    }
+
+    const newStatus = mapEventToPaymentStatus(eventType);
+    const eventDetails = `${eventType} at ${event.create_time || new Date().toISOString()}`;
+
+    console.log(`   Transaction: ${transactionId}`);
+    console.log(`   New Status: ${newStatus}`);
+
+    if (transactionId) {
+      await updatePaymentStatusInSheet(transactionId, newStatus, eventType, eventDetails);
+    } else {
+      console.warn('⚠️ Could not extract transaction ID from webhook event');
+    }
+  } else {
+    console.log(`   ℹ️ Unhandled event type: ${eventType} — ignored`);
+  }
+
+  // Always return 200 to PayPal so it doesn't retry
+  res.status(200).json({ received: true });
+}
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
@@ -357,4 +527,10 @@ app.listen(PORT, () => {
   console.log(`  - POST /save-booking (Saves booking to Google Sheet)`);
   console.log(`  - POST /api/paypal/create-order (Create PayPal checkout)`);
   console.log(`  - POST /api/paypal/capture-order (Capture PayPal payment)`);
+  console.log(`  - POST /api/paypal/webhook (PayPal event notifications)`);
+  if (PAYPAL_WEBHOOK_ID) {
+    console.log(`\n🔔 Webhook signature verification: ENABLED`);
+  } else {
+    console.log(`\n⚠️  Webhook signature verification: DISABLED (set PAYPAL_WEBHOOK_ID to enable)`);
+  }
 });
