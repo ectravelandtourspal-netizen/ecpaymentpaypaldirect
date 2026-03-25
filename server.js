@@ -346,6 +346,7 @@ app.post('/api/paypal/capture-order', async (req, res) => {
 // Proxy EmailJS calls through the backend to avoid IPv6 connectivity issues
 
 const EMAILJS_API_URL = 'https://api.emailjs.com/api/v1.0/email/send';
+const EMAILJS_PRIVATE_KEY = process.env.EMAILJS_PRIVATE_KEY || '';
 
 app.post('/api/send-email', async (req, res) => {
   const { service_id, template_id, template_params, user_id } = req.body;
@@ -358,7 +359,7 @@ app.post('/api/send-email', async (req, res) => {
     const response = await fetch(EMAILJS_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service_id, template_id, template_params, user_id }),
+      body: JSON.stringify({ service_id, template_id, template_params, user_id, accessToken: EMAILJS_PRIVATE_KEY }),
     });
 
     const text = await response.text();
