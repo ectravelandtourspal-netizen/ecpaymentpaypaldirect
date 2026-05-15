@@ -1,12 +1,6 @@
-# EC Travel and Tours - Backend Server
+# EC Travel and Tours - Backend Server (PayMongo)
 
-Optional backend server for advanced server-side features.
-
-## Important
-
-For the current production setup, booking data is saved directly from `booking.html`
-to a Google Apps Script Web App, so this backend is **not required** for the current booking flow.
-Use this backend only if you need private server-side integrations.
+Backend server handling PayMongo payments, webhook events, email notifications, and Google Sheet updates.
 
 ## Setup
 
@@ -16,15 +10,22 @@ npm install
 ```
 
 ### 2. Environment Variables
-Create a `.env` file in the backend directory:
+Create a `.env` file in the root directory:
 ```
-TWILIO_ACCOUNT_SID=your_twilio_account_sid
-TWILIO_AUTH_TOKEN=your_twilio_auth_token
-TWILIO_WHATSAPP_NUMBER=+14155238886
+PAYMONGO_SECRET_KEY=your_paymongo_secret_key_here
+PAYMONGO_WEBHOOK_SECRET=
+EMAILJS_PRIVATE_KEY=your_emailjs_private_key
+FRONTEND_URL=https://yoursite.com
 PORT=3000
 ```
 
-### 3. Run the Server
+### 3. Register PayMongo Webhook (one-time)
+```bash
+node register-webhook.js https://your-render-url.onrender.com
+```
+Copy the printed `PAYMONGO_WEBHOOK_SECRET` into your `.env`, then restart.
+
+### 4. Run the Server
 
 **Development mode (with auto-reload):**
 ```bash
@@ -44,36 +45,49 @@ The server will start on `http://localhost:3000`
 ```
 GET /health
 ```
-Returns server status.
 
 ### Save Booking
 ```
 POST /save-booking
-Content-Type: application/json
-
-{
-  "firstName": "Juan",
-  "lastName": "Dela Cruz",
-  "email": "guest@example.com",
-  "travelDate": "2026-03-10",
-  "package": "CORON - EL NIDO"
-}
 ```
+Saves booking data to Google Sheet.
 
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Booking saved successfully",
-  "timestamp": "2026-01-20T...",
-  "sheetUpdated": true
-}
+### PayMongo — Create Checkout Session
+```
+POST /api/paymongo/create-checkout
+```
+Creates a PayMongo checkout session and returns `checkoutUrl`.
+
+### PayMongo — Verify Payment
+```
+POST /api/paymongo/verify-payment
+```
+Verifies payment status after user returns from PayMongo.
+
+### PayMongo — Webhook
+```
+POST /api/paymongo/webhook
+```
+Receives PayMongo payment events. Paste this URL into the PayMongo dashboard.
+
+### Email Proxy
+```
+POST /api/send-email
+```
+Proxies EmailJS email sends from the backend.
+
+## Deploy on Render
+
+See `render.yaml` for deployment config. Set all environment variables in the Render dashboard — never commit real credentials.
+
+## Webhook URL for PayMongo Dashboard
+```
+https://your-render-url.onrender.com/api/paymongo/webhook
 ```
 
 ## Notes
 
-- Booking save uses the Google Apps Script Web App URL configured in `server.js`
-- `/save-booking` forwards booking data to Apps Script with `action: 'save_booking'`
+- Webhook signature verification is enabled automatically when `PAYMONGO_WEBHOOK_SECRET` is set
 - All timestamps are in UTC
 - Store secrets only in `.env` and never commit real credentials
 

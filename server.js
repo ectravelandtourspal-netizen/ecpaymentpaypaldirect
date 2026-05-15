@@ -1,11 +1,12 @@
 const express = require('express');
+const crypto = require('crypto');
 const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
 
-// PayPal webhook needs raw body for signature verification — must be before express.json()
-app.post('/api/paypal/webhook', express.raw({ type: 'application/json' }), handlePayPalWebhook);
+// PayMongo webhook needs raw body for signature verification — must be before express.json()
+app.post('/api/paymongo/webhook', express.raw({ type: 'application/json' }), handlePayMongoWebhook);
 
 app.use(express.json());
 
@@ -22,87 +23,86 @@ app.use(cors({
 }));
 
 // Google Apps Script Web App URL for updating Google Sheet
-const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyyQv8WPzCU60mUc2nJRTpVNJDfnK4yMm7h8B22bUQs8iMROcTrAGHeS5tdw6TS62tE/exec';
+const GOOGLE_APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzMRGcupMkfPF1s76W8wek9B-GvvjsJyf7TSkuhcBsifMR4hygOdvD_1fkFALnTd9g/exec';
 
-// ================= PAYPAL CONFIGURATION =================
-const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
-const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
-const PAYPAL_MODE = process.env.PAYPAL_MODE || 'sandbox';
-const PAYPAL_BASE_URL = PAYPAL_MODE === 'live'
-  ? 'https://api-m.paypal.com'
-  : 'https://api-m.sandbox.paypal.com';
-const PAYPAL_WEBHOOK_ID = process.env.PAYPAL_WEBHOOK_ID || '';
+// ================= PAYMONGO CONFIGURATION =================
+const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY;
+const PAYMONGO_WEBHOOK_SECRET = process.env.PAYMONGO_WEBHOOK_SECRET || '';
+const PAYMONGO_BASE_URL = 'https://api.paymongo.com/v1';
 
-// Get PayPal access token
-async function getPayPalAccessToken() {
-  const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString('base64');
-  const response = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+// In-memory store for pending bookings (webhook uses this for email data)
+const pendingBookings = new Map();
+// Clean up entries older than 24 hours every hour
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [id, entry] of pendingBookings) {
+    if (entry.createdAt < cutoff) pendingBookings.delete(id);
+  }
+}, 60 * 60 * 1000);
+
+// Create PayMongo checkout session
+async function createPayMongoCheckout(amount, currency, description, successUrl, cancelUrl, metadata) {
+  const auth = Buffer.from(`${PAYMONGO_SECRET_KEY}:`).toString('base64');
+
+  const requestBody = {
+    data: {
+      attributes: {
+        send_email_receipt: false,
+        show_description: true,
+        show_line_items: true,
+        description: description,
+        line_items: [{
+          currency: currency,
+          amount: Math.round(amount * 100), // PayMongo uses centavos
+          name: description,
+          quantity: 1,
+        }],
+        payment_method_types: [
+          'gcash', 'card'
+        ],
+        metadata: metadata || {},
+        success_url: successUrl,
+        cancel_url: cancelUrl,
+      }
+    }
+  };
+
+  console.log('📤 PayMongo request:', JSON.stringify(requestBody, null, 2));
+  console.log('📤 Auth key starts with:', PAYMONGO_SECRET_KEY?.substring(0, 10) + '...');
+
+  const response = await fetch(`${PAYMONGO_BASE_URL}/checkout_sessions`, {
     method: 'POST',
     headers: {
       'Authorization': `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`PayPal auth failed: ${response.status} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  return data.access_token;
-}
-
-// Create PayPal order
-async function createPayPalOrder(amount, currency, description, returnUrl, cancelUrl) {
-  const accessToken = await getPayPalAccessToken();
-  const response = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
       'Content-Type': 'application/json',
+      'Accept': 'application/json',
     },
-    body: JSON.stringify({
-      intent: 'CAPTURE',
-      purchase_units: [{
-        amount: {
-          currency_code: currency,
-          value: amount.toFixed(2),
-        },
-        description: description,
-      }],
-      application_context: {
-        return_url: returnUrl,
-        cancel_url: cancelUrl,
-        brand_name: 'EC Travel and Tours',
-        user_action: 'PAY_NOW',
-      },
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`PayPal order creation failed: ${response.status} - ${errorText}`);
+    console.error('❌ PayMongo API response:', response.status, errorText);
+    throw new Error(`PayMongo checkout creation failed: ${response.status} - ${errorText}`);
   }
 
   return await response.json();
 }
 
-// Capture PayPal order
-async function capturePayPalOrder(orderId) {
-  const accessToken = await getPayPalAccessToken();
-  const response = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
-    method: 'POST',
+// Retrieve PayMongo checkout session
+async function retrievePayMongoCheckout(checkoutSessionId) {
+  const auth = Buffer.from(`${PAYMONGO_SECRET_KEY}:`).toString('base64');
+  const response = await fetch(`${PAYMONGO_BASE_URL}/checkout_sessions/${encodeURIComponent(checkoutSessionId)}`, {
+    method: 'GET',
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
+      'Authorization': `Basic ${auth}`,
+      'Accept': 'application/json',
     },
   });
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`PayPal capture failed: ${response.status} - ${errorText}`);
+    throw new Error(`PayMongo retrieve failed: ${response.status} - ${errorText}`);
   }
 
   return await response.json();
@@ -259,85 +259,132 @@ app.post('/save-booking', async (req, res) => {
   }
 });
 
-// ================= PAYPAL ENDPOINTS =================
+// ================= PAYMONGO ENDPOINTS =================
 
-// Create PayPal order — called by frontend before redirecting user to PayPal
-app.post('/api/paypal/create-order', async (req, res) => {
-  const { amount, currency, description } = req.body;
+// Create PayMongo checkout session — called by frontend before redirecting user
+app.post('/api/paymongo/create-checkout', async (req, res) => {
+  const { amount, currency, description, returnUrl, bookingMetadata } = req.body;
 
   if (!amount || amount <= 0) {
     return res.status(400).json({ success: false, error: 'Invalid amount' });
   }
-  if (!PAYPAL_CLIENT_ID || !PAYPAL_CLIENT_SECRET) {
-    return res.status(500).json({ success: false, error: 'PayPal credentials not configured' });
+  if (!PAYMONGO_SECRET_KEY) {
+    return res.status(500).json({ success: false, error: 'PayMongo credentials not configured' });
   }
 
   try {
-    const primaryOrigin = ALLOWED_ORIGINS[0];
-    const returnUrl = `${primaryOrigin}/booking.html?paypal=capture`;
-    const cancelUrl = `${primaryOrigin}/booking.html?paypal=cancelled`;
+    // Use returnUrl from frontend if provided, otherwise fall back to origin-based URL
+    const baseUrl = returnUrl || `${req.headers.origin || ALLOWED_ORIGINS[0]}/booking.html`;
+    const successUrl = `${baseUrl}?paymongo=success`;
+    const cancelUrl = `${baseUrl}?paymongo=cancelled`;
 
-    const order = await createPayPalOrder(
+    // Build metadata for PayMongo (all values must be strings)
+    const metadata = {};
+    if (bookingMetadata) {
+      for (const [key, val] of Object.entries(bookingMetadata)) {
+        metadata[key] = String(val ?? '');
+      }
+    }
+
+    const checkout = await createPayMongoCheckout(
       parseFloat(amount),
       currency || 'PHP',
       description || 'EC Travel Booking Downpayment',
-      returnUrl,
-      cancelUrl
+      successUrl,
+      cancelUrl,
+      metadata
     );
 
-    const approvalLink = order.links.find(link => link.rel === 'approve');
-    if (!approvalLink) {
-      return res.status(500).json({ success: false, error: 'No approval URL from PayPal' });
+    const checkoutUrl = checkout.data.attributes.checkout_url;
+    const checkoutId = checkout.data.id;
+
+    if (!checkoutUrl) {
+      return res.status(500).json({ success: false, error: 'No checkout URL from PayMongo' });
     }
 
-    console.log(`✅ PayPal order created: ${order.id} for ₱${amount}`);
+    // Store booking data for webhook to use when sending email
+    if (bookingMetadata) {
+      pendingBookings.set(checkoutId, {
+        bookingData: bookingMetadata,
+        createdAt: Date.now()
+      });
+    }
+
+    console.log(`✅ PayMongo checkout created: ${checkoutId} for ₱${amount}`);
 
     res.json({
       success: true,
-      orderId: order.id,
-      approvalUrl: approvalLink.href,
+      checkoutId: checkoutId,
+      checkoutUrl: checkoutUrl,
     });
   } catch (error) {
-    console.error('❌ PayPal create-order error:', error.message);
+    console.error('❌ PayMongo create-checkout error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Capture PayPal order — called by frontend after user returns from PayPal
-app.post('/api/paypal/capture-order', async (req, res) => {
-  const { orderId } = req.body;
+// Verify PayMongo payment — called by frontend after user returns from PayMongo
+app.post('/api/paymongo/verify-payment', async (req, res) => {
+  const { checkoutId } = req.body;
 
-  if (!orderId) {
-    return res.status(400).json({ success: false, error: 'Missing orderId' });
+  if (!checkoutId) {
+    return res.status(400).json({ success: false, error: 'Missing checkoutId' });
   }
 
   try {
-    const captureData = await capturePayPalOrder(orderId);
+    const checkoutData = await retrievePayMongoCheckout(checkoutId);
+    const attributes = checkoutData.data.attributes;
+    const paymentStatus = attributes.status; // e.g. 'paid', 'expired', 'active'
+    const payments = attributes.payments || [];
+    
+    let transactionId = '';
+    let grossAmount = '0';
+    let netAmount = '0';
+    let fee = '0';
+    let receivedCurrency = 'PHP';
 
-    const capture = captureData.purchase_units?.[0]?.payments?.captures?.[0];
-    const transactionId = capture?.id || '';
-    const status = captureData.status; // COMPLETED
-    const grossAmount = capture?.amount?.value || '0';
-    const receivedCurrency = capture?.amount?.currency_code || 'PHP';
+    if (payments.length > 0) {
+      const payment = payments[0];
+      transactionId = payment.id || '';
+      const paymentAttrs = payment.attributes || {};
+      grossAmount = (paymentAttrs.amount / 100).toFixed(2); // PayMongo stores in centavos
+      netAmount = paymentAttrs.net_amount ? (paymentAttrs.net_amount / 100).toFixed(2) : grossAmount;
+      fee = paymentAttrs.fee ? (paymentAttrs.fee / 100).toFixed(2) : '0';
+      receivedCurrency = paymentAttrs.currency || 'PHP';
+    }
 
-    // Net amount = what you actually receive after PayPal fees
-    const breakdown = capture?.seller_receivable_breakdown;
-    const netAmount = breakdown?.net_amount?.value || grossAmount;
-    const paypalFee = breakdown?.paypal_fee?.value || '0';
+    const isPaid = paymentStatus === 'paid' || (payments.length > 0 && payments[0].attributes?.status === 'paid');
 
-    console.log(`✅ PayPal payment captured: ${transactionId} — ${receivedCurrency} gross: ${grossAmount}, net: ${netAmount}, fee: ${paypalFee} — Status: ${status}`);
+    console.log(`✅ PayMongo payment verified: ${transactionId} — ${receivedCurrency} gross: ${grossAmount}, net: ${netAmount}, fee: ${fee} — Status: ${paymentStatus}`);
 
     res.json({
-      success: status === 'COMPLETED',
+      success: isPaid,
       transactionId,
-      status,
+      status: paymentStatus,
       receivedAmount: netAmount,
       grossAmount,
-      paypalFee,
+      paymongoFee: fee,
       receivedCurrency,
     });
   } catch (error) {
-    console.error('❌ PayPal capture-order error:', error.message);
+    console.error('❌ PayMongo verify-payment error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Update sheet status by checkoutId — frontend fallback in case webhook is delayed
+app.post('/api/paymongo/update-sheet-status', async (req, res) => {
+  const { checkoutId, transactionId, receivedAmount, paymentStatus } = req.body;
+
+  if (!checkoutId) {
+    return res.status(400).json({ success: false, error: 'Missing checkoutId' });
+  }
+
+  try {
+    const updated = await updatePaymentByCheckoutId(checkoutId, transactionId, receivedAmount, paymentStatus);
+    res.json({ success: updated });
+  } catch (error) {
+    console.error('❌ update-sheet-status error:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -356,10 +403,15 @@ app.post('/api/send-email', async (req, res) => {
   }
 
   try {
+    const emailPayload = { service_id, template_id, template_params, user_id };
+    if (EMAILJS_PRIVATE_KEY) {
+      emailPayload.accessToken = EMAILJS_PRIVATE_KEY;
+    }
+
     const response = await fetch(EMAILJS_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service_id, template_id, template_params, user_id, accessToken: EMAILJS_PRIVATE_KEY }),
+      body: JSON.stringify(emailPayload),
     });
 
     const text = await response.text();
@@ -377,51 +429,198 @@ app.post('/api/send-email', async (req, res) => {
   }
 });
 
-// ================= PAYPAL WEBHOOK =================
+// ================= PAYMONGO WEBHOOK =================
 
-// Verify PayPal webhook signature using PayPal's verification API
-async function verifyWebhookSignature(headers, rawBody) {
-  if (!PAYPAL_WEBHOOK_ID) {
-    console.warn('⚠️ PAYPAL_WEBHOOK_ID not set — skipping signature verification');
-    return false;
+// Send confirmation email via EmailJS (used by webhook)
+async function sendConfirmationEmailFromWebhook(bookingData, transactionId, receivedAmount) {
+  try {
+    const guestEmailParams = {
+      to_email: bookingData.email,
+      user_email: bookingData.email,
+      email: bookingData.email,
+      recipient_email: bookingData.email,
+      recipient: bookingData.email,
+      guest_name: `${bookingData.firstName} ${bookingData.lastName}`,
+      package_name: bookingData.packageName || '',
+      travel_date: bookingData.travelDate || '',
+      number_of_guests: bookingData.numberOfGuests || '',
+      guest_address: bookingData.address || '',
+      guest_city: bookingData.city || '',
+      guest_country: bookingData.country || '',
+      guest_phone: bookingData.phone || '',
+      emergency_contact_title: bookingData.emergencyTitle || '',
+      emergency_contact_first_name: bookingData.emergencyFirstName || '',
+      emergency_contact_last_name: bookingData.emergencyLastName || '',
+      emergency_contact_phone: bookingData.emergencyPhone || '',
+      emergency_contact_relationship: bookingData.emergencyRelationship || '',
+      subtotal_price: bookingData.subtotalPrice ? `₱${parseFloat(bookingData.subtotalPrice).toLocaleString()}` : '',
+      coupon_code: bookingData.couponCode || 'None',
+      discount_percentage: bookingData.discountPercentage || '0',
+      discount_amount: bookingData.discountAmount && parseFloat(bookingData.discountAmount) > 0 ? `-₱${parseFloat(bookingData.discountAmount).toLocaleString()}` : 'None',
+      payment_fee: bookingData.paymentFee ? `₱${parseFloat(bookingData.paymentFee).toLocaleString()}` : '₱0',
+      total_price: bookingData.totalPrice ? `₱${parseFloat(bookingData.totalPrice).toLocaleString()}` : '',
+      food_restriction: bookingData.foodRestriction || 'None',
+      additional_guests: bookingData.additionalGuests || 'None',
+      payment_method: 'PayMongo',
+      payment_instructions: `Payment confirmed via PayMongo. Transaction ID: ${transactionId}. Amount paid: ₱${parseFloat(receivedAmount || 0).toLocaleString()}`
+    };
+
+    const emailPayload = {
+      service_id: 'service_71wxksu',
+      template_id: 'template_xzc9veh',
+      template_params: guestEmailParams,
+      user_id: 'oICGyBSpy8vOU95iJ'
+    };
+    if (EMAILJS_PRIVATE_KEY) {
+      emailPayload.accessToken = EMAILJS_PRIVATE_KEY;
+    }
+
+    const guestRes = await fetch(EMAILJS_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(emailPayload),
+    });
+    if (guestRes.ok) {
+      console.log(`✅ Webhook: Guest confirmation email sent to ${bookingData.email}`);
+    } else {
+      const errText = await guestRes.text();
+      console.error(`❌ Webhook: Guest email failed: ${guestRes.status} ${errText}`);
+    }
+
+    // Company notification email
+    const companyEmailParams = {
+      to_email: 'ectravelandtourspal@gmail.com',
+      user_email: 'ectravelandtourspal@gmail.com',
+      email: 'ectravelandtourspal@gmail.com',
+      recipient_email: 'ectravelandtourspal@gmail.com',
+      recipient: 'ectravelandtourspal@gmail.com',
+      company_name: 'EC Travel and Tours',
+      guest_name: `${bookingData.firstName} ${bookingData.lastName}`,
+      guest_email: bookingData.email,
+      guest_phone: bookingData.phone || '',
+      guest_address: bookingData.address || '',
+      guest_city: bookingData.city || '',
+      guest_country: bookingData.country || '',
+      emergency_contact_title: bookingData.emergencyTitle || '',
+      emergency_contact_first_name: bookingData.emergencyFirstName || '',
+      emergency_contact_last_name: bookingData.emergencyLastName || '',
+      emergency_contact_phone: bookingData.emergencyPhone || '',
+      emergency_contact_relationship: bookingData.emergencyRelationship || '',
+      package_name: bookingData.packageName || '',
+      travel_date: bookingData.travelDate || '',
+      number_of_guests: bookingData.numberOfGuests || '',
+      subtotal_price: bookingData.subtotalPrice ? `₱${parseFloat(bookingData.subtotalPrice).toLocaleString()}` : '',
+      coupon_code: bookingData.couponCode || 'None',
+      discount_percentage: bookingData.discountPercentage || '0',
+      discount_amount: bookingData.discountAmount && parseFloat(bookingData.discountAmount) > 0 ? `-₱${parseFloat(bookingData.discountAmount).toLocaleString()}` : 'None',
+      payment_fee: bookingData.paymentFee ? `₱${parseFloat(bookingData.paymentFee).toLocaleString()}` : '₱0',
+      total_price: bookingData.totalPrice ? `₱${parseFloat(bookingData.totalPrice).toLocaleString()}` : '',
+      food_restriction: bookingData.foodRestriction || 'None',
+      additional_guests: bookingData.additionalGuests || 'None',
+      payment_method: 'PayMongo (Paid)',
+      payment_instructions: `PayMongo Transaction ID: ${transactionId} | Amount: ₱${parseFloat(receivedAmount || 0).toLocaleString()}`
+    };
+
+    const companyPayload = {
+      service_id: 'service_71wxksu',
+      template_id: 'template_102pzgp',
+      template_params: companyEmailParams,
+      user_id: 'oICGyBSpy8vOU95iJ'
+    };
+    if (EMAILJS_PRIVATE_KEY) {
+      companyPayload.accessToken = EMAILJS_PRIVATE_KEY;
+    }
+
+    const companyRes = await fetch(EMAILJS_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(companyPayload),
+    });
+    if (companyRes.ok) {
+      console.log(`✅ Webhook: Company notification email sent`);
+    } else {
+      const errText = await companyRes.text();
+      console.error(`❌ Webhook: Company email failed: ${companyRes.status} ${errText}`);
+    }
+  } catch (error) {
+    console.error('❌ Webhook: Email sending error:', error.message);
   }
-
-  const accessToken = await getPayPalAccessToken();
-  const response = await fetch(`${PAYPAL_BASE_URL}/v1/notifications/verify-webhook-signature`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      auth_algo: headers['paypal-auth-algo'],
-      cert_url: headers['paypal-cert-url'],
-      transmission_id: headers['paypal-transmission-id'],
-      transmission_sig: headers['paypal-transmission-sig'],
-      transmission_time: headers['paypal-transmission-time'],
-      webhook_id: PAYPAL_WEBHOOK_ID,
-      webhook_event: JSON.parse(rawBody),
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error('❌ Webhook signature verification request failed:', errorText);
-    return false;
-  }
-
-  const result = await response.json();
-  return result.verification_status === 'SUCCESS';
 }
 
-// Map PayPal event types to sheet-friendly payment statuses
-function mapEventToPaymentStatus(eventType) {
+// Update Google Sheet by checkoutId — replaces checkoutId with real transactionId and sets status
+async function updatePaymentByCheckoutId(checkoutId, transactionId, receivedAmount, newStatus) {
+  try {
+    console.log(`📋 Updating Google Sheet: checkout ${checkoutId} → txn ${transactionId}, status ${newStatus}`);
+
+    const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'update_payment_by_checkout',
+        checkoutId: checkoutId,
+        transactionId: transactionId,
+        receivedAmount: receivedAmount,
+        paymentStatus: newStatus,
+      }),
+    });
+
+    const result = await response.json();
+    if (result.success || result.status === 'success') {
+      console.log(`✅ Sheet updated: ${checkoutId} → ${transactionId} (${newStatus}) — rows: ${result.updatedRows || 0}`);
+      return true;
+    } else {
+      console.error('❌ Sheet update failed:', result.error || result.message);
+      return false;
+    }
+  } catch (error) {
+    console.error('❌ Error updating sheet:', error.message);
+    return false;
+  }
+}
+
+// Verify PayMongo webhook signature using HMAC-SHA256
+function verifyPayMongoWebhookSignature(rawBody, signatureHeader, webhookSecret) {
+  if (!webhookSecret) {
+    console.warn('⚠️ PAYMONGO_WEBHOOK_SECRET not set — skipping signature verification');
+    return false;
+  }
+
+  // PayMongo signature header format: t=<timestamp>,te=,li=<signature>
+  // or t=<timestamp>,te=<test_signature>,li=<live_signature>
+  const parts = {};
+  signatureHeader.split(',').forEach(part => {
+    const [key, value] = part.split('=');
+    parts[key] = value;
+  });
+
+  const timestamp = parts['t'];
+  const testSignature = parts['te'];
+  const liveSignature = parts['li'];
+  const signatureToVerify = liveSignature || testSignature;
+
+  if (!timestamp || !signatureToVerify) {
+    console.error('❌ Missing timestamp or signature in header');
+    return false;
+  }
+
+  // Compute HMAC-SHA256: concat timestamp + '.' + rawBody
+  const payload = `${timestamp}.${rawBody}`;
+  const computedSignature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
+
+  return crypto.timingSafeEqual(
+    Buffer.from(computedSignature, 'hex'),
+    Buffer.from(signatureToVerify, 'hex')
+  );
+}
+
+// Map PayMongo event types to sheet-friendly payment statuses
+function mapPayMongoEventToPaymentStatus(eventType) {
   const statusMap = {
-    'PAYMENT.CAPTURE.COMPLETED': 'Paid',
-    'PAYMENT.CAPTURE.REFUNDED': 'Refunded',
-    'PAYMENT.CAPTURE.REVERSED': 'Reversed',
-    'PAYMENT.CAPTURE.DENIED': 'Denied',
-    'PAYMENT.CAPTURE.PENDING': 'Pending',
+    'checkout_session.payment.paid': 'Paid',
+    'payment.paid': 'Paid',
+    'payment.failed': 'Failed',
+    'payment.refunded': 'Refunded',
+    'payment.refund.updated': 'Refunded',
   };
   return statusMap[eventType] || eventType;
 }
@@ -436,7 +635,7 @@ async function updatePaymentStatusInSheet(transactionId, newStatus, eventType, e
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         action: 'update_payment_status',
-        paypalTransactionId: transactionId,
+        paymongoTransactionId: transactionId,
         paymentStatus: newStatus,
         eventType: eventType,
         eventDetails: eventDetails,
@@ -457,29 +656,31 @@ async function updatePaymentStatusInSheet(transactionId, newStatus, eventType, e
   }
 }
 
-// PayPal webhook handler
-async function handlePayPalWebhook(req, res) {
+// PayMongo webhook handler
+async function handlePayMongoWebhook(req, res) {
   const rawBody = req.body.toString('utf8');
 
-  console.log('\n🔔 PayPal Webhook received');
+  console.log('\n🔔 PayMongo Webhook received');
 
   // Parse event
   let event;
   try {
-    event = JSON.parse(rawBody);
+    const parsed = JSON.parse(rawBody);
+    event = parsed.data;
   } catch (err) {
     console.error('❌ Invalid webhook JSON');
     return res.status(400).json({ error: 'Invalid JSON' });
   }
 
-  const eventType = event.event_type;
+  const eventType = event?.attributes?.type;
   console.log(`   Event: ${eventType}`);
-  console.log(`   ID: ${event.id}`);
+  console.log(`   ID: ${event?.id}`);
 
-  // Verify signature (if webhook ID is configured)
-  if (PAYPAL_WEBHOOK_ID) {
+  // Verify signature (if webhook secret is configured)
+  if (PAYMONGO_WEBHOOK_SECRET) {
+    const signatureHeader = req.headers['paymongo-signature'] || '';
     try {
-      const isValid = await verifyWebhookSignature(req.headers, rawBody);
+      const isValid = verifyPayMongoWebhookSignature(rawBody, signatureHeader, PAYMONGO_WEBHOOK_SECRET);
       if (!isValid) {
         console.error('❌ Webhook signature verification FAILED — rejecting');
         return res.status(401).json({ error: 'Signature verification failed' });
@@ -491,54 +692,74 @@ async function handlePayPalWebhook(req, res) {
     }
   }
 
-  // Handle payment capture events
+  // Handle payment events
   const HANDLED_EVENTS = [
-    'PAYMENT.CAPTURE.COMPLETED',
-    'PAYMENT.CAPTURE.REFUNDED',
-    'PAYMENT.CAPTURE.REVERSED',
-    'PAYMENT.CAPTURE.DENIED',
-    'PAYMENT.CAPTURE.PENDING',
+    'checkout_session.payment.paid',
+    'payment.paid',
+    'payment.failed',
+    'payment.refunded',
+    'payment.refund.updated',
   ];
 
   if (HANDLED_EVENTS.includes(eventType)) {
-    const resource = event.resource || {};
-    // For refund events, the transaction ID is in resource.links or resource.id
-    // For capture events, it's resource.id
-    let transactionId = '';
+    const resource = event?.attributes?.data || {};
+    const resourceAttrs = resource?.attributes || {};
 
-    if (eventType === 'PAYMENT.CAPTURE.REFUNDED') {
-      // Refund event: resource is the refund object, parent capture ID is in links
-      const captureLink = (resource.links || []).find(l => l.rel === 'up');
-      if (captureLink && captureLink.href) {
-        // Extract capture ID from URL: .../captures/CAPTURE_ID
-        const parts = captureLink.href.split('/');
-        transactionId = parts[parts.length - 1];
-      }
-      // Fallback: check supplementary_data
-      if (!transactionId) {
-        transactionId = resource.supplementary_data?.related_ids?.capture_id || resource.id || '';
+    // For checkout_session events, extract payment ID from payments array
+    let transactionId = '';
+    let checkoutId = '';
+    let receivedAmount = '0';
+    const metadata = resourceAttrs.metadata || {};
+
+    if (eventType === 'checkout_session.payment.paid') {
+      checkoutId = resource?.id || '';
+      const payments = resourceAttrs.payments || [];
+      if (payments.length > 0) {
+        transactionId = payments[0].id || '';
+        const paymentAttrs = payments[0].attributes || {};
+        receivedAmount = paymentAttrs.amount ? (paymentAttrs.amount / 100).toFixed(2) : '0';
       }
     } else {
-      // For COMPLETED, DENIED, PENDING, REVERSED — resource.id IS the capture/transaction ID
-      transactionId = resource.id || '';
+      transactionId = resource?.id || '';
+      const amount = resourceAttrs.amount;
+      receivedAmount = amount ? (amount / 100).toFixed(2) : '0';
     }
 
-    const newStatus = mapEventToPaymentStatus(eventType);
-    const eventDetails = `${eventType} at ${event.create_time || new Date().toISOString()}`;
+    const newStatus = mapPayMongoEventToPaymentStatus(eventType);
+    const eventDetails = `${eventType} at ${new Date().toISOString()}`;
 
+    console.log(`   Checkout: ${checkoutId}`);
     console.log(`   Transaction: ${transactionId}`);
+    console.log(`   Amount: ₱${receivedAmount}`);
     console.log(`   New Status: ${newStatus}`);
 
-    if (transactionId) {
+    // Update Google Sheet — find by checkoutId and set real transactionId + status
+    if (checkoutId) {
+      await updatePaymentByCheckoutId(checkoutId, transactionId, receivedAmount, newStatus);
+    } else if (transactionId) {
       await updatePaymentStatusInSheet(transactionId, newStatus, eventType, eventDetails);
-    } else {
-      console.warn('⚠️ Could not extract transaction ID from webhook event');
+    }
+
+    // Send confirmation email on successful payment
+    if (newStatus === 'Paid' && (checkoutId || transactionId)) {
+      // Get booking data from in-memory store or from PayMongo metadata
+      const pendingEntry = pendingBookings.get(checkoutId);
+      const bookingData = pendingEntry?.bookingData || metadata;
+
+      if (bookingData && bookingData.email) {
+        console.log(`   📧 Sending confirmation email to ${bookingData.email}...`);
+        await sendConfirmationEmailFromWebhook(bookingData, transactionId, receivedAmount);
+        // Clean up
+        if (checkoutId) pendingBookings.delete(checkoutId);
+      } else {
+        console.warn('⚠️ No booking data available for email — user will rely on frontend fallback');
+      }
     }
   } else {
     console.log(`   ℹ️ Unhandled event type: ${eventType} — ignored`);
   }
 
-  // Always return 200 to PayPal so it doesn't retry
+  // Always return 200 to PayMongo so it doesn't retry
   res.status(200).json({ received: true });
 }
 
@@ -556,18 +777,18 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 EC Travel Backend Server running on http://localhost:${PORT}`);
-  console.log(`   PayPal Mode: ${PAYPAL_MODE}`);
+  console.log(`   PayMongo: ${PAYMONGO_SECRET_KEY ? 'Configured' : 'NOT configured'}`);
   console.log(`   Frontend URL: ${FRONTEND_URL}`);
   console.log('\n✅ Endpoints:');
   console.log(`  - GET  /health`);
   console.log(`  - POST /save-booking (Saves booking to Google Sheet)`);
-  console.log(`  - POST /api/paypal/create-order (Create PayPal checkout)`);
-  console.log(`  - POST /api/paypal/capture-order (Capture PayPal payment)`);
-  console.log(`  - POST /api/paypal/webhook (PayPal event notifications)`);
+  console.log(`  - POST /api/paymongo/create-checkout (Create PayMongo checkout session)`);
+  console.log(`  - POST /api/paymongo/verify-payment (Verify PayMongo payment)`);
+  console.log(`  - POST /api/paymongo/webhook (PayMongo event notifications)`);
   console.log(`  - POST /api/send-email (Email proxy via EmailJS)`);
-  if (PAYPAL_WEBHOOK_ID) {
+  if (PAYMONGO_WEBHOOK_SECRET) {
     console.log(`\n🔔 Webhook signature verification: ENABLED`);
   } else {
-    console.log(`\n⚠️  Webhook signature verification: DISABLED (set PAYPAL_WEBHOOK_ID to enable)`);
+    console.log(`\n⚠️  Webhook signature verification: DISABLED (set PAYMONGO_WEBHOOK_SECRET to enable)`);
   }
 });

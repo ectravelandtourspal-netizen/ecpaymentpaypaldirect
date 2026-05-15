@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ec-travel-backend
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: PAYMONGO_SECRET_KEY
+        sync: false          # Set this in Render dashboard — DO NOT commit real keys
+      - key: PAYMONGO_WEBHOOK_SECRET
+        sync: false          # Paste here after registering webhook in PayMongo dashboard
+      - key: EMAILJS_PRIVATE_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false          # e.g. https://yoursite.com or https://yourname.github.io
