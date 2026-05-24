@@ -272,6 +272,18 @@ app.post('/api/paymongo/create-checkout', async (req, res) => {
     return res.status(500).json({ success: false, error: 'PayMongo credentials not configured' });
   }
 
+  // Log policy agreement — form requires checkbox to be checked before submission
+  const transactionCode = bookingMetadata?.email || 'N/A';
+  console.log(`\n📋 ============================================`);
+  console.log(`📋 [POLICY AGREED] User agreed to the Booking Policy`);
+  console.log(`📋 Transaction Code : ${transactionCode}`);
+  console.log(`📋 Guest Name       : ${bookingMetadata?.firstName || ''} ${bookingMetadata?.lastName || ''}`);
+  console.log(`📋 WhatsApp / Phone : ${bookingMetadata?.phone || 'N/A'}`);
+  console.log(`📋 Package          : ${bookingMetadata?.packageName || 'N/A'}`);
+  console.log(`📋 Travel Date      : ${bookingMetadata?.travelDate || 'N/A'}`);
+  console.log(`📋 Amount           : ₱${amount}`);
+  console.log(`📋 ============================================\n`);
+
   try {
     // Use returnUrl from frontend if provided, otherwise fall back to origin-based URL
     const baseUrl = returnUrl || `${req.headers.origin || ALLOWED_ORIGINS[0]}/booking.html`;
@@ -356,6 +368,34 @@ app.post('/api/paymongo/verify-payment', async (req, res) => {
     const isPaid = paymentStatus === 'paid' || (payments.length > 0 && payments[0].attributes?.status === 'paid');
 
     console.log(`✅ PayMongo payment verified: ${transactionId} — ${receivedCurrency} gross: ${grossAmount}, net: ${netAmount}, fee: ${fee} — Status: ${paymentStatus}`);
+
+    // --- Payment Invoice Log ---
+    const pendingEntry = pendingBookings.get(checkoutId);
+    const bookingData = pendingEntry?.bookingData || {};
+    const statusLabel = {
+      paid: '✅ PAID',
+      active: '🕐 PENDING',
+      expired: '❌ EXPIRED / CANCELLED',
+      unpaid: '🕐 PENDING',
+    }[paymentStatus] || `ℹ️ ${paymentStatus.toUpperCase()}`;
+    console.log(`\n💳 ================================================`);
+    console.log(`💳  PAYMENT INVOICE — VERIFY-PAYMENT`);
+    console.log(`💳  Status            : ${statusLabel}`);
+    console.log(`💳  Transaction Code  : ${bookingData.email || checkoutId}`);
+    console.log(`💳  Checkout ID       : ${checkoutId}`);
+    console.log(`💳  Transaction ID    : ${transactionId || 'N/A'}`);
+    console.log(`💳  Guest Name        : ${bookingData.firstName || ''} ${bookingData.lastName || ''}`.trimEnd());
+    console.log(`💳  Email             : ${bookingData.email || 'N/A'}`);
+    console.log(`💳  WhatsApp / Phone  : ${bookingData.phone || 'N/A'}`);
+    console.log(`💳  Package           : ${bookingData.packageName || 'N/A'}`);
+    console.log(`💳  Travel Date       : ${bookingData.travelDate || 'N/A'}`);
+    console.log(`💳  Guests            : ${bookingData.numberOfGuests || 'N/A'}`);
+    console.log(`💳  Gross Amount      : ${receivedCurrency} ${grossAmount}`);
+    console.log(`💳  PayMongo Fee      : ${receivedCurrency} ${fee}`);
+    console.log(`💳  Net Amount        : ${receivedCurrency} ${netAmount}`);
+    console.log(`💳  Timestamp         : ${new Date().toISOString()}`);
+    console.log(`💳 ================================================\n`);
+    // --- End Invoice Log ---
 
     res.json({
       success: isPaid,
@@ -732,6 +772,33 @@ async function handlePayMongoWebhook(req, res) {
     console.log(`   Transaction: ${transactionId}`);
     console.log(`   Amount: ₱${receivedAmount}`);
     console.log(`   New Status: ${newStatus}`);
+
+    // --- Webhook Payment Invoice Log ---
+    const webhookBookingEntry = pendingBookings.get(checkoutId);
+    const webhookBookingData = webhookBookingEntry?.bookingData || metadata;
+    const webhookStatusLabel = {
+      'Paid': '✅ PAID',
+      'Failed': '❌ FAILED',
+      'Refunded': '↩️ REFUNDED',
+      'Cancelled': '🚫 CANCELLED',
+    }[newStatus] || `ℹ️ ${newStatus.toUpperCase()}`;
+    console.log(`\n💳 ================================================`);
+    console.log(`💳  PAYMENT INVOICE — WEBHOOK`);
+    console.log(`💳  Status            : ${webhookStatusLabel}`);
+    console.log(`💳  Event Type        : ${eventType}`);
+    console.log(`💳  Transaction Code  : ${webhookBookingData.email || checkoutId || transactionId}`);
+    console.log(`💳  Checkout ID       : ${checkoutId || 'N/A'}`);
+    console.log(`💳  Transaction ID    : ${transactionId || 'N/A'}`);
+    console.log(`💳  Guest Name        : ${webhookBookingData.firstName || ''} ${webhookBookingData.lastName || ''}`.trimEnd());
+    console.log(`💳  Email             : ${webhookBookingData.email || 'N/A'}`);
+    console.log(`💳  WhatsApp / Phone  : ${webhookBookingData.phone || 'N/A'}`);
+    console.log(`💳  Package           : ${webhookBookingData.packageName || 'N/A'}`);
+    console.log(`💳  Travel Date       : ${webhookBookingData.travelDate || 'N/A'}`);
+    console.log(`💳  Guests            : ${webhookBookingData.numberOfGuests || 'N/A'}`);
+    console.log(`💳  Amount            : ₱${receivedAmount}`);
+    console.log(`💳  Timestamp         : ${new Date().toISOString()}`);
+    console.log(`💳 ================================================\n`);
+    // --- End Invoice Log ---
 
     // Update Google Sheet — find by checkoutId and set real transactionId + status
     if (checkoutId) {
