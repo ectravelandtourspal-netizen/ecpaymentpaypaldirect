@@ -702,14 +702,18 @@ async function handlePayMongoWebhook(req, res) {
 
   console.log('\n🔔 PayMongo Webhook received');
 
+  // IMPORTANT: Always respond 200 immediately so PayMongo never disables the webhook.
+  // All processing happens after the response is sent.
+  res.status(200).json({ received: true });
+
   // Parse event
   let event;
   try {
     const parsed = JSON.parse(rawBody);
     event = parsed.data;
   } catch (err) {
-    console.error('❌ Invalid webhook JSON');
-    return res.status(400).json({ error: 'Invalid JSON' });
+    console.error('❌ Invalid webhook JSON — ignored');
+    return;
   }
 
   const eventType = event?.attributes?.type;
@@ -722,13 +726,13 @@ async function handlePayMongoWebhook(req, res) {
     try {
       const isValid = verifyPayMongoWebhookSignature(rawBody, signatureHeader, PAYMONGO_WEBHOOK_SECRET);
       if (!isValid) {
-        console.error('❌ Webhook signature verification FAILED — rejecting');
-        return res.status(401).json({ error: 'Signature verification failed' });
+        console.error('❌ Webhook signature verification FAILED — event ignored (but 200 already sent)');
+        return;
       }
       console.log('   ✅ Signature verified');
     } catch (verifyError) {
-      console.error('❌ Webhook verification error:', verifyError.message);
-      return res.status(500).json({ error: 'Verification error' });
+      console.error('❌ Webhook verification error:', verifyError.message, '— event ignored (but 200 already sent)');
+      return;
     }
   }
 
@@ -825,9 +829,7 @@ async function handlePayMongoWebhook(req, res) {
   } else {
     console.log(`   ℹ️ Unhandled event type: ${eventType} — ignored`);
   }
-
-  // Always return 200 to PayMongo so it doesn't retry
-  res.status(200).json({ received: true });
+  // 200 was already sent at the start of this handler
 }
 
 // Error handling middleware
