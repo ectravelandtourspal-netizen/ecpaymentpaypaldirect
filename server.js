@@ -698,13 +698,14 @@ async function updatePaymentStatusInSheet(transactionId, newStatus, eventType, e
 
 // PayMongo webhook handler
 async function handlePayMongoWebhook(req, res) {
-  const rawBody = req.body.toString('utf8');
+  // IMPORTANT: Always respond 200 FIRST — before ANY processing.
+  // PayMongo disables the webhook on any non-200 or timeout response.
+  res.status(200).json({ received: true });
 
   console.log('\n🔔 PayMongo Webhook received');
 
-  // IMPORTANT: Always respond 200 immediately so PayMongo never disables the webhook.
-  // All processing happens after the response is sent.
-  res.status(200).json({ received: true });
+  // Safely get raw body
+  const rawBody = req.body ? req.body.toString('utf8') : '';
 
   // Parse event
   let event;
