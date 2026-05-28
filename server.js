@@ -286,7 +286,15 @@ app.post('/api/paymongo/create-checkout', async (req, res) => {
 
   try {
     // Use returnUrl from frontend if provided, otherwise fall back to origin-based URL
-    const baseUrl = returnUrl || `${req.headers.origin || ALLOWED_ORIGINS[0]}/booking.html`;
+    let baseUrl = returnUrl || `${req.headers.origin || ALLOWED_ORIGINS[0]}/booking.html`;
+
+    // PayMongo live mode requires HTTPS success_url for 3DS card authentication.
+    // If returnUrl is localhost/127.0.0.1 (local dev), force the public FRONTEND_URL instead.
+    const isLocalUrl = baseUrl.startsWith('http://localhost') || baseUrl.startsWith('http://127.0.0.1');
+    if (isLocalUrl && FRONTEND_URL && !FRONTEND_URL.startsWith('http://localhost') && !FRONTEND_URL.startsWith('http://127.0.0.1')) {
+      baseUrl = `${FRONTEND_URL.split(',')[0].trim()}/booking.html`;
+    }
+
     const successUrl = `${baseUrl}?paymongo=success`;
     const cancelUrl = `${baseUrl}?paymongo=cancelled`;
 
